@@ -3,12 +3,15 @@
 import type { OperationOutcomeError } from '@medplum/core';
 import { normalizeErrorString, sleep } from '@medplum/core';
 import { RepositoryMode } from '@medplum/fhir-router';
+import type { ResourceType } from '@medplum/fhirtypes';
 import type { Pool, PoolClient } from 'pg';
 import { getConfig } from '../../config/loader';
 import { DatabaseMode, getDatabasePool } from '../../database';
 import { getLogger } from '../../logger';
 import type { TransactionIsolationLevel } from '../sql';
 import { isRetryableTransactionError, normalizeDatabaseError } from '../sql';
+import type { RepositoryAccessLayer, RepositoryAccessOperation } from './access-tracker';
+import { createRepositoryAccessTracker } from './access-tracker';
 
 const defaultTransactionAttempts = 2;
 const defaultExpBackoffBaseDelayMs = 50;
@@ -48,6 +51,7 @@ export class RepositoryConnection implements Disposable {
   private preCommitCallbacks: (() => Promise<void>)[] = [];
   private postCommitCallbacks: (() => Promise<void>)[] = [];
   private callbackStack: CallbackFrame[] = [];
+  private readonly accessTracker = createRepositoryAccessTracker();
 
   /**
    * Creates a connection that owns any PoolClient it acquires.
@@ -78,6 +82,15 @@ export class RepositoryConnection implements Disposable {
 
   hasConnection(): boolean {
     return !!this.conn;
+  }
+
+  recordResourceAccess(
+    layer: RepositoryAccessLayer,
+    operation: RepositoryAccessOperation,
+    resourceTypes: Iterable<ResourceType>,
+    source: string
+  ): void {
+    this.accessTracker.recordResourceAccess(layer, operation, resourceTypes, source);
   }
 
   /**
@@ -164,7 +177,7 @@ export class RepositoryConnection implements Disposable {
 
   async withStatementTimeout<TResult>(
     options: StatementTimeoutOptions,
-    callback: (client: PoolClient) => Promise<TResult>
+    callback: () => Promise<TResult>
   ): Promise<TResult> {
     this.assertNotClosed();
     this.assertOwnsClient();
@@ -178,7 +191,7 @@ export class RepositoryConnection implements Disposable {
 
     try {
       await client.query(`SELECT set_config('statement_timeout', $1, false)`, [String(options.timeoutMs)]);
-      return await callback(client);
+      return await callback();
     } finally {
       this.pinDepth--;
       if (this.pinDepth === 0) {
@@ -325,6 +338,7 @@ export class RepositoryConnection implements Disposable {
       }
       this.transactionDepth = nextDepth;
       this.pushCallbackFrame();
+      this.accessTracker.pushTransactionFrame();
       return conn;
     });
   }
@@ -351,6 +365,8 @@ export class RepositoryConnection implements Disposable {
         this.transactionIsolationLevel = undefined;
         this.releaseConnection();
         this.clearCallbackStack();
+        const frame = this.accessTracker.popTransactionFrame();
+        this.accessTracker.logTransactionAccess(frame, 'committed');
         return true;
       } else {
         // If RELEASE SAVEPOINT fails (e.g. transaction in aborted state), let the error propagate.
@@ -360,6 +376,7 @@ export class RepositoryConnection implements Disposable {
         await conn.query('RELEASE SAVEPOINT sp' + this.transactionDepth);
         this.transactionDepth--; // safe to decrement since assertInTransaction() ensures transactionDepth > 0
         this.popCallbackFrame();
+        this.accessTracker.mergeLastTransactionFrame();
         return false;
       }
     });
@@ -395,6 +412,7 @@ export class RepositoryConnection implements Disposable {
         this.transactionDepth = 0;
         this.transactionIsolationLevel = undefined;
         this.clearCallbackStack();
+        this.accessTracker.clearTransactionFrames();
         // Pass the original triggering error so the client is released with the right root cause.
         this.releaseConnection(error);
         return;
@@ -404,6 +422,10 @@ export class RepositoryConnection implements Disposable {
       if (isOuter) {
         this.transactionIsolationLevel = undefined;
         this.releaseConnection(error);
+        const frame = this.accessTracker.popTransactionFrame();
+        this.accessTracker.logTransactionAccess(frame, 'rolled_back');
+      } else {
+        this.accessTracker.mergeLastTransactionFrame();
       }
     });
   }
