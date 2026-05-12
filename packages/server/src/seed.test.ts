@@ -4,6 +4,7 @@ import type { Project } from '@medplum/fhirtypes';
 import { initAppServices, shutdownApp } from './app';
 import { loadTestConfig } from './config/loader';
 import { DatabaseMode, getDatabasePool } from './database';
+import { configureGinIndexes } from './fhir/operations/db-configure-indexes';
 import type { SystemRepository } from './fhir/repo';
 import { getGlobalSystemRepo } from './fhir/repo';
 import { SelectQuery } from './fhir/sql';
@@ -63,8 +64,14 @@ describe('Seed', () => {
     console.log(`${new Date().toISOString()} - Initializing app services`);
     await initAppServices(config);
     await withTestContext(async () => {
+      const repo = getGlobalSystemRepo();
       // Run post-deploy migrations synchronously
-      await synchronouslyRunAllPendingPostDeployMigrations(getGlobalSystemRepo());
+      await synchronouslyRunAllPendingPostDeployMigrations(repo);
+
+      const action: { sql: string; durationMs?: number }[] = [];
+      await configureGinIndexes(repo.getDatabaseClient(DatabaseMode.WRITER), action, ['Appointment', 'Slot'], {
+        fastUpdate: false,
+      });
     });
   });
 

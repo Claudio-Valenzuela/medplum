@@ -125,7 +125,7 @@ type GinIndexConfig = {
   ginPendingListLimit?: 'reset' | number;
 };
 
-async function configureGinIndexes(
+export async function configureGinIndexes(
   client: PoolClient | Pool,
   actions: OutputAction[],
   tableNames: string[],
