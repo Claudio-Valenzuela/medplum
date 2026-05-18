@@ -10,7 +10,12 @@ import { DatabaseMode, getDatabasePool } from '../../database';
 import { getLogger } from '../../logger';
 import type { TransactionIsolationLevel } from '../sql';
 import { isRetryableTransactionError, normalizeDatabaseError } from '../sql';
-import type { RepositoryAccessLayer, RepositoryAccessOperation } from './access-tracker';
+import type {
+  ExecuteSqlOptions,
+  RepositoryAccessLayer,
+  RepositoryAccessOperation,
+  TransactionSqlOptions,
+} from './access-tracker';
 import { createRepositoryAccessTracker } from './access-tracker';
 
 const defaultTransactionAttempts = 2;
@@ -100,10 +105,15 @@ export class RepositoryConnection implements Disposable {
    * The return value can either be a pool client or a pool.
    * If in a transaction, then returns the transaction client (PoolClient).
    * Otherwise, returns the pool (Pool).
-   * @param mode - The database mode.
+   * @param options - SQL execution metadata.
    * @returns The database client.
    */
-  getDatabaseClient(mode: DatabaseMode): Pool | PoolClient {
+  getDatabaseClient(options: ExecuteSqlOptions): Pool | PoolClient {
+    this.recordResourceAccess('sql', options.operation, options.resourceTypes, options.source);
+    return this.getDatabaseClientForMode(options.mode);
+  }
+
+  private getDatabaseClientForMode(mode: DatabaseMode): Pool | PoolClient {
     this.assertNotClosed();
     if (this.conn) {
       // A held client might be pinned outside a transaction, but it still has one physical
@@ -180,9 +190,15 @@ export class RepositoryConnection implements Disposable {
     callback: () => Promise<TResult>
   ): Promise<TResult> {
     this.assertNotClosed();
-    this.assertOwnsClient();
-    if (this.transactionDepth > 0) {
-      throw new Error('Cannot set statement timeout during an active transaction');
+
+    let isLocal = false;
+    if (this.isInTransaction()) {
+      isLocal = true;
+    } else {
+      // when not in a transaction, don't allow changing the config of a borrowed connection since
+      // that would mean it gets returned to the owner in a different state than it was when borrowed
+      // this may be too restrictive, but hold the line for now
+      this.assertOwnsClient('Cannot set statement timeout on a borrowed connection');
     }
 
     const client = await this.getConnection(options.mode ?? DatabaseMode.WRITER);
@@ -190,7 +206,7 @@ export class RepositoryConnection implements Disposable {
     this.discardOnRelease = true;
 
     try {
-      await client.query(`SELECT set_config('statement_timeout', $1, false)`, [String(options.timeoutMs)]);
+      await client.query(`SELECT set_config('statement_timeout', $1, $2)`, [String(options.timeoutMs), isLocal]);
       return await callback();
     } finally {
       this.pinDepth--;
@@ -200,10 +216,7 @@ export class RepositoryConnection implements Disposable {
     }
   }
 
-  async withTransaction<TResult>(
-    callback: (client: PoolClient) => Promise<TResult>,
-    options?: { serializable?: boolean }
-  ): Promise<TResult> {
+  async withTransaction<TResult>(callback: () => Promise<TResult>, options: TransactionSqlOptions): Promise<TResult> {
     this.assertNotClosed();
     const isolationLevel = options?.serializable ? 'SERIALIZABLE' : 'REPEATABLE READ';
 
@@ -214,9 +227,10 @@ export class RepositoryConnection implements Disposable {
       const attemptStartTime = Date.now();
       let transactionStarted = false;
       try {
-        const client = await this.beginTransaction(isolationLevel);
+        await this.beginTransaction(isolationLevel);
         transactionStarted = true;
-        const result = await callback(client);
+        this.recordResourceAccess('sql', 'transaction', options.resourceTypes, options.source);
+        const result = await callback();
         await this.commitTransaction();
         if (attempt > 0) {
           getLogger().info('Completed transaction', {
@@ -442,9 +456,9 @@ export class RepositoryConnection implements Disposable {
     }
   }
 
-  private assertOwnsClient(): void {
+  private assertOwnsClient(errorMessage?: string): void {
     if (!this.ownsClient) {
-      throw new Error('Does not own database client');
+      throw new Error(errorMessage ?? 'Does not own database client');
     }
   }
 
