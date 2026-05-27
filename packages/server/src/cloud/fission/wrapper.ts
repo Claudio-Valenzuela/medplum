@@ -74,7 +74,7 @@ module.exports = async function (context) {
       console.error('Unhandled error: ' + err);
     }
     return {
-      status: 400,
+      status: 200,
       body: JSON.stringify({
         returnValue: normalizeOperationOutcome(err),
         logResult: logOutput.join('\\n'),
