@@ -103,7 +103,7 @@ import { getPatients } from './patient';
 import { preCommitValidation } from './precommit';
 import { replaceConditionalReferences, validateResourceReferences } from './references';
 import type { ExecuteSqlOptions, TransactionSqlOptions } from './repository/access-tracker';
-import { getLocalReferenceResourceTypes } from './repository/access-tracker';
+import { getResourceTypesFromReferences } from './repository/access-tracker';
 import { removeField } from './repository/field-utils';
 import { removeCachedProfile } from './repository/profile-cache';
 import type { StatementTimeoutOptions } from './repository/repository-connection';
@@ -2378,7 +2378,7 @@ export class Repository extends FhirRepository implements Disposable {
     this.connection.recordResourceAccess(
       'cache',
       'read',
-      getLocalReferenceResourceTypes(references),
+      getResourceTypesFromReferences(references),
       'repo.getCacheEntries'
     );
     return getResourceCacheEntries(references);
