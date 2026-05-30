@@ -4,6 +4,8 @@ Overview: https://openid.net/certification/
 
 OpenID Implementer's Guide: https://openid.net/specs/openid-connect-basic-1_0.html
 
+Test Portal: https://www.certification.openid.net/
+
 ## Setup the Practitioner
 
 For both local and production testing, setup your Practitioner profile with all of the OpenID user info properties:
