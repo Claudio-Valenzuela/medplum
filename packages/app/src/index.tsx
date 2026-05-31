@@ -14,10 +14,14 @@ import { App } from './App';
 import { getConfig } from './config';
 import './index.css';
 
+// Variable exportada para acceso global (Singleton)
+export let medplum: MedplumClient;
+
 export async function initApp(): Promise<void> {
   const config = getConfig();
 
-  const medplum = new MedplumClient({
+  // Asignación a la variable global
+  medplum = new MedplumClient({
     baseUrl: config.baseUrl,
     clientId: config.clientId,
     storagePrefix: '@medplum:',
